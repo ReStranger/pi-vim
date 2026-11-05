@@ -269,6 +269,12 @@ function replaceRange(text: string, start: number, end: number, replacement = ""
 	return text.slice(0, start) + replacement + text.slice(end);
 }
 
+function replaceTargetChar(data: string): string | undefined {
+	if (data === "\r" || data === "\n") return "\n";
+	if (data === "\t") return "\t";
+	return printableSingleGrapheme(data);
+}
+
 function printableSingleGrapheme(data: string): string | undefined {
 	if (!data) return undefined;
 	let result: string | undefined;
@@ -764,22 +770,68 @@ class VimModeEditor extends CustomEditor {
 	private replaceUnderCursor(char: string, count = 1): void {
 		this.clearPending();
 		this.edit((text, offset) => {
-			if (offset >= lineEnd(text, offset)) return undefined;
+			const lineEndOffset = lineEnd(text, offset);
+			if (offset >= lineEndOffset) return undefined;
+
 			let end = offset;
 			let replaced = 0;
 			for (let i = 0; i < count; i++) {
-				end = nextGraphemeOffset(text, end);
-				if (end > lineEnd(text, offset)) {
-					end = lineEnd(text, offset);
-					break;
-				}
+				if (end >= lineEndOffset) break;
+				end = Math.min(lineEndOffset, nextGraphemeOffset(text, end));
 				replaced++;
 			}
+			if (replaced === 0) return undefined;
+
+			if (char === "\n") {
+				const nextText = replaceRange(text, offset, end, "\n");
+				const nextCursorOffset = firstNonWhitespace(nextText, offset + 1);
+				return {
+					text: nextText,
+					cursorOffset: nextCursorOffset,
+				};
+			}
+
+			const replacement = char.repeat(replaced);
+			const nextText = replaceRange(text, offset, end, replacement);
+			let cursorOffset = offset;
+			for (let i = 0; i < replaced - 1; i++) {
+				cursorOffset += char.length;
+			}
 			return {
-				text: replaceRange(text, offset, end, char.repeat(Math.max(1, replaced))),
-				cursorOffset: offset,
+				text: nextText,
+				cursorOffset,
 			};
 		});
+	}
+
+	private applyVisualReplace(char: string): void {
+		const range = this.getVisualRange();
+		if (!range) {
+			this.clearPending();
+			this.setMode("normal");
+			return;
+		}
+		this.clearPending();
+		const text = this.getCurrentText();
+		const selected = text.slice(range.start, range.end);
+		let replacement = "";
+		if (char === "\n") {
+			replacement = "\n";
+		} else {
+			for (const segment of graphemeSegmenter.segment(selected)) {
+				if (segment.segment === "\n" || segment.segment === "\r\n") {
+					replacement += segment.segment;
+				} else {
+					replacement += char;
+				}
+			}
+		}
+		this.writeYank(selected, range.linewise ? "line" : "char");
+		this.edit(() => ({
+			text: replaceRange(text, range.start, range.end, replacement),
+			cursorOffset: range.start,
+		}));
+		this.setMode("normal");
 	}
 
 	private deleteBackwardChar(): boolean {
@@ -815,7 +867,7 @@ class VimModeEditor extends CustomEditor {
 			this.deleteBackwardChar();
 			return;
 		}
-		if (!(data.length === 1 && data.charCodeAt(0) >= 32)) {
+		if (!printableSingleGrapheme(data)) {
 			super.handleInput(data);
 			return;
 		}
@@ -1253,12 +1305,14 @@ class VimModeEditor extends CustomEditor {
 
 		switch (this.pending) {
 			case "r": {
-				const char = printableSingleGrapheme(data);
-				if (char) {
+				const char = replaceTargetChar(data);
+				if (char !== undefined) {
 					this.replaceUnderCursor(char, this.takeCount(1));
 					return true;
 				}
-				break;
+				this.clearPending();
+				this.tui.requestRender();
+				return true;
 			}
 			case "y":
 			case "d":
@@ -1366,6 +1420,11 @@ class VimModeEditor extends CustomEditor {
 
 		if (this.isInterruptKey(data)) {
 			if (this.mode === "visual" || this.mode === "visual-line") {
+				if (this.pending) {
+					this.clearPending();
+					this.tui.requestRender();
+					return;
+				}
 				this.exitVisual();
 			} else if (this.mode === "insert" || this.mode === "replace") {
 				if (this.isShowingAutocomplete()) {
@@ -1409,6 +1468,21 @@ class VimModeEditor extends CustomEditor {
 		}
 
 		if (this.mode === "visual" || this.mode === "visual-line") {
+			if (this.pending === "r") {
+				if (this.isInterruptKey(data)) {
+					this.clearPending();
+					this.tui.requestRender();
+					return;
+				}
+				const char = replaceTargetChar(data);
+				if (char !== undefined) {
+					this.applyVisualReplace(char);
+					return;
+				}
+				this.clearPending();
+				this.tui.requestRender();
+				return;
+			}
 			if (this.matchesAction(data, "tui.input.copy")) {
 				this.applyVisual("yank");
 				return;
@@ -1436,10 +1510,14 @@ class VimModeEditor extends CustomEditor {
 				case "P":
 					this.applyVisual("put");
 					return;
+				case "r":
+					this.pending = "r";
+					this.emitStatus();
+					return;
 			}
 		}
 
-		if (this.pending && data >= "0" && data <= "9") {
+		if ((this.pending === "d" || this.pending === "c" || this.pending === "y") && data >= "0" && data <= "9") {
 			if (this.count.length < 5) this.count += data;
 			if (this.count.length >= 5) {
 				this.clearPending();

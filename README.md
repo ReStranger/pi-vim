@@ -110,6 +110,7 @@ Toggle with:
 - `y` yank selection
 - editor copy shortcut yanks selection
 - `c` change selection
+- `r{char}` replace selection with character
 - `p`, `P` replace selection with system clipboard
 
 ### Linewise
@@ -120,6 +121,7 @@ Toggle with:
 - `d` / `x` delete selected lines
 - `y` yank selected lines
 - `c` change selected lines
+- `r{char}` replace characters in selected lines with character
 - `p`, `P` replace selected lines from the system clipboard
 
 > [!NOTE]
